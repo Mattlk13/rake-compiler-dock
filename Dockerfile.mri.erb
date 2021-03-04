@@ -1,12 +1,34 @@
-FROM ubuntu:<%= platform=~/linux/ ? "16.04" : "18.04" %>
+FROM <%=
+  case platform
+    when /x86_64-linux/ then "quay.io/pypa/manylinux2014_x86_64"
+    when /x86-linux/ then "quay.io/pypa/manylinux2014_i686"
+    else "ubuntu:20.04"
+  end %>
 
+<% if platform=~/linux/ %>
+# install packages which rvm will require
+RUN yum install -y autoconf gcc-c++ libtool readline-devel sqlite-devel ruby openssl-devel xz cmake sudo less
+
+# Prepare sudo and delete sudo as alias to gosu
+RUN rm -f /usr/local/bin/sudo && \
+    groupadd -r sudo && \
+    echo "%sudo  ALL=(ALL)       ALL" >> /etc/sudoers
+<% else %>
+ENV DEBIAN_FRONTEND noninteractive
 RUN apt-get -y update && \
-    apt-get install -y curl git-core xz-utils build-essential wget unzip sudo gnupg2 dirmngr && \
+    apt-get install -y curl git-core xz-utils build-essential zlib1g-dev libreadline-dev libssl-dev wget unzip sudo gnupg2 dirmngr cmake pkg-config && \
     rm -rf /var/lib/apt/lists/*
+<% end %>
 
 # Add "rvm" as system group, to avoid conflicts with host GIDs typically starting with 1000
-RUN groupadd -r rvm && useradd -r -g rvm -G sudo -p "" --create-home rvm && \
-    echo "source /etc/profile.d/rvm.sh" >> /etc/rubybashrc
+RUN groupadd -r rvm && useradd -r -g rvm -G sudo -p "" --create-home rvm
+
+# Make sure rvm and later settings are available in interactive and non-interactive shells
+RUN echo "source /etc/profile.d/rvm.sh" >> /etc/rubybashrc && \
+    echo "source /etc/rubybashrc" >> /etc/bashrc && \
+    echo "source /etc/rubybashrc" >> /etc/bash.bashrc
+ENV BASH_ENV /etc/rubybashrc
+
 USER rvm
 
 RUN mkdir ~/.gnupg && \
@@ -18,14 +40,14 @@ RUN gpg --keyserver hkp://pool.sks-keyservers.net --recv-keys 409B6B1796C275462A
     (curl -L http://get.rvm.io | sudo bash) && \
     bash -c " \
         source /etc/rubybashrc && \
+        rvm autolibs disable && \
         rvmsudo rvm cleanup all "
 
 # Import patch files for ruby and gems
 COPY build/patches /home/rvm/patches/
-ENV BASH_ENV /etc/rubybashrc
 
 # install rubies and fix permissions on
-ENV RVM_RUBIES 2.5.7 2.7.0
+ENV RVM_RUBIES 2.5.8 3.0.0
 RUN bash -c " \
     export CFLAGS='-s -O3 -fno-fast-math -fPIC' && \
     for v in ${RVM_RUBIES} ; do \
@@ -39,7 +61,7 @@ RUN bash -c " \
 RUN echo "gem: --no-ri --no-rdoc" >> ~/.gemrc && \
     bash -c " \
         rvm all do gem update --system --no-document && \
-        rvm all do gem install --no-document bundler 'bundler:~>1.16' 'rake-compiler:1.1.0' 'hoe:3.20.0' mini_portile rubygems-tasks mini_portile2 && \
+        rvm all do gem install --no-document bundler 'bundler:~>1.16' 'rake-compiler:1.1.1' 'hoe:3.20.0' mini_portile rubygems-tasks mini_portile2 && \
         find /usr/local/rvm -type d -print0 | sudo xargs -0 chmod g+sw "
 
 # Install rake-compiler's cross rubies in global dir instead of /root
@@ -49,15 +71,18 @@ RUN sudo mkdir -p /usr/local/rake-compiler && \
 
 # Add cross compilers for Windows and Linux
 USER root
+
+<% if platform !~ /linux/ %>
 RUN apt-get -y update && \
-    apt-get install -y moreutils <%
+    apt-get install -y <%
+if platform=~/darwin/     %> clang python lzma-dev libxml2-dev libssl-dev libc++-10-dev <% end %><%
 if platform=~/x86-mingw32/   %> gcc-mingw-w64-i686 g++-mingw-w64-i686 <% end %><%
-if platform=~/x64-mingw32/ %> gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 <% end %><%
-if platform=~/x86-linux/     %> gcc-multilib g++-multilib <% end %> && \
+if platform=~/x64-mingw32/ %> gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 <% end %> && \
     rm -rf /var/lib/apt/lists/*
+<% end %>
 
 RUN bash -c " \
-        rvm alias create default 2.5.7 && \
+        rvm alias create default 2.5.8 && \
         rvm use default "
 
 <% if platform=~/linux/   %>
@@ -67,45 +92,74 @@ RUN bash -c " \
         ruby /root/mk_i686.rb "
 <% end %>
 
+<% if platform=~/darwin/ %>
+RUN git clone -q --depth=1 https://github.com/tpoechtrager/osxcross.git /opt/osxcross && rm -rf /opt/osxcross/.git && \
+    cd /opt/osxcross/tarballs && \
+    curl -L -o MacOSX11.1.sdk.tar.xz https://github.com/larskanis/MacOSX-SDKs/releases/download/11.1/MacOSX11.1.sdk.tar.xz && \
+    tar -xf MacOSX11.1.sdk.tar.xz -C . && \
+    cp -rf /usr/lib/llvm-10/include/c++ MacOSX11.1.sdk/usr/include/c++ && \
+    cp -rf /usr/include/x86_64-linux-gnu/c++/9/bits/ MacOSX11.1.sdk/usr/include/c++/v1/bits && \
+    tar -cJf MacOSX11.1.sdk.tar.xz MacOSX11.1.sdk && \
+    cd /opt/osxcross && \
+    UNATTENDED=1 SDK_VERSION=11.1 OSX_VERSION_MIN=10.13 USE_CLANG_AS=1 ./build.sh && \
+    rm -rf *~ build tarballs/*
+
+RUN echo "export PATH=/opt/osxcross/target/bin:\$PATH" >> /etc/rubybashrc && \
+    echo "export MACOSX_DEPLOYMENT_TARGET=10.13" >> /etc/rubybashrc && \
+    echo "export OSXCROSS_MP_INC=1" >> /etc/rubybashrc
+
+# Add links to build tools without target version kind of:
+#   arm64-apple-darwin-clang   =>   arm64-apple-darwin20.1-clang
+RUN rm /opt/osxcross/target/bin/*-apple-darwin-* ; \
+    find /opt/osxcross/target/bin/ -name '*-apple-darwin[0-9]*' | sort | while read f ; do d=`echo $f | sed s/darwin[0-9\.]*/darwin/`; echo $f '"$@"' | tee $d && chmod +x $d ; done
+
+# There's no objdump in osxcross but we can use llvm's
+RUN ln -s /usr/lib/llvm-10/bin/llvm-objdump /opt/osxcross/target/bin/x86_64-apple-darwin-objdump && \
+    ln -s /usr/lib/llvm-10/bin/llvm-objdump /opt/osxcross/target/bin/aarch64-apple-darwin-objdump
+
+<% end %>
+
 # Patch rake-compiler to build and install static libraries for Linux rubies
 USER rvm
 COPY build/patches2 /home/rvm/patches/
 RUN bash -c " \
     for v in ${RVM_RUBIES} ; do \
-      cd /usr/local/rvm/gems/ruby-\$v/gems/rake-compiler-1.1.0 && \
-      ( git apply /home/rvm/patches/rake-compiler-1.1.0/*.patch || true ) && \
+      cd /usr/local/rvm/gems/ruby-\$v/gems/rake-compiler-1.1.1 && \
+      echo applying patches to ruby-\$v /home/rvm/patches/rake-compiler-1.1.1/*.patch && \
+      ( git apply /home/rvm/patches/rake-compiler-1.1.1/*.patch || true ) && \
       cd /usr/local/rvm/gems/ruby-\$v/gems/hoe-3.20.0 && \
+      echo applying patches to ruby-\$v /home/rvm/patches/hoe-3.20.0/*.patch && \
       ( git apply /home/rvm/patches/hoe-3.20.0/*.patch || true ) \
     done "
 
-# Patch ruby-2.7.0 for cross build
+# Patch rubies for cross build
 USER root
-RUN curl -SL http://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.0.tar.xz | tar -xJC /root/ && \
-    cd /root/ruby-2.7.0 && \
-    git apply /home/rvm/patches/ruby-2.7.0/*.patch && \
-    cd .. && \
-    mkdir -p /usr/local/rake-compiler/sources/ && \
-    tar cjf /usr/local/rake-compiler/sources/ruby-2.7.0.tar.bz2 ruby-2.7.0 && \
-    chown rvm /usr/local/rake-compiler -R && \
-    rm -rf /root/ruby-2.7.0
+RUN bash -c " \
+    for v in 2.7.0 3.0.0 ; do \
+      curl -SL http://cache.ruby-lang.org/pub/ruby/\${v:0:3}/ruby-\$v.tar.xz | tar -xJC /root/ && \
+      cd /root/ruby-\$v && \
+      git apply /home/rvm/patches/ruby-\$v/*.patch && \
+      cd .. && \
+      mkdir -p /usr/local/rake-compiler/sources/ && \
+      tar cjf /usr/local/rake-compiler/sources/ruby-\$v.tar.bz2 ruby-\$v && \
+      chown rvm /usr/local/rake-compiler -R && \
+      rm -rf /root/ruby-\$v ; \
+    done "
 USER rvm
 
 
-ENV XRUBIES 2.7.0:2.6.0:2.5.0:2.4.0:2.3.0:2.2.2
+ENV XRUBIES 3.0.0:2.7.0:2.6.0:2.5.0:2.4.0:2.3.0
 
+<% strip = '-s' if platform !~ /darwin/ %>
 # Build all xruby versions in parallel
 # Then cleanup all build artifacts
 RUN bash -c " \
-    export CFLAGS='-s -O1 -fno-omit-frame-pointer -fno-fast-math' && \
-    export MAKE='make V=0' && \
+    export CFLAGS='-O1 -fno-omit-frame-pointer -fno-fast-math -fstack-protector-strong <%= strip %>' && \
+    export LDFLAGS='-pipe <%= strip %>' && \
+    <%= "export LIBS='-l:libssp.a' &&" if platform =~ /mingw/ %> \
+    <%= "export CC=#{target}-clang &&" if platform =~ /darwin/ %> \
+    export MAKE='make V=1' && \
     rake-compiler cross-ruby VERSION=$XRUBIES HOST=<%= target %> && \
-    rm -rf ~/.rake-compiler/builds ~/.rake-compiler/sources && \
-    find /usr/local/rvm -type d -print0 | sudo xargs -0 chmod g+sw "
-
-RUN bash -c " \
-    export CFLAGS='-s -O1 -fno-omit-frame-pointer -fno-fast-math' && \
-    export MAKE='make V=0' && \
-    rvm 2.7.0 do rake-compiler cross-ruby VERSION=3.0.0-preview1 HOST=<%= target %> && \
     rm -rf ~/.rake-compiler/builds ~/.rake-compiler/sources && \
     find /usr/local/rvm -type d -print0 | sudo xargs -0 chmod g+sw "
 
@@ -129,18 +183,9 @@ RUN find /usr/local/rake-compiler/ruby -name *msvcrt-ruby*.dll.a | while read f 
 
 USER root
 
-# Add more libraries and tools to support cross build
-RUN <%
-if platform=~/x86-linux/   %> dpkg --add-architecture i386 && <% end %> \
-    apt-get -y update && \
-    apt-get install -y cmake <%
-if platform=~/x86-linux/   %> libc6-dev:i386 libudev-dev:i386 <% end %><%
-if platform=~/x86_64-linux/ %> libudev-dev <% end %> && \
-    rm -rf /var/lib/apt/lists/*
+# Fix paths in rake-compiler/config.yml
+RUN sed -i -- "s:/root/.rake-compiler:/usr/local/rake-compiler:g" /usr/local/rake-compiler/config.yml
 
-# Fix paths in rake-compiler/config.yml and add rvm and mingw-tools to the global bashrc
-RUN sed -i -- "s:/root/.rake-compiler:/usr/local/rake-compiler:g" /usr/local/rake-compiler/config.yml && \
-    echo "source /etc/profile.d/rvm.sh" >> /etc/bash.bashrc
 
 <% if platform=~/mingw/ %>
 # Install wrappers for strip commands as a workaround for "Protocol error" in boot2docker.
@@ -156,21 +201,31 @@ RUN printf "1\n" | update-alternatives --config <%= target %>-gcc && \
 <% end %>
 
 <% if platform=~/linux/ %>
-# Make the system to have GLIBC 2.12 instead of 2.23 so that
-# generated ruby package can run on CentOS 6 with GLIBC 2.12
-RUN sed -i 's/__GLIBC_MINOR__\t[0-9][0-9]/__GLIBC_MINOR__\t12/' /usr/include/features.h
+# Enable modern compiler toolset of manylinux image
+RUN echo "export PATH=\$DEVTOOLSET_ROOTPATH/usr/bin:\$PATH" >> /etc/rubybashrc
+
+# Add prefixed versions of compiler tools
+RUN for f in addr2line gcc gcov-tool ranlib ar dwp gcc-ranlib nm readelf as elfedit gcc-ar gprof objcopy size c++filt g++ gcov ld objdump strings cpp gcc-nm pkg-config strip ; do ln -sf $DEVTOOLSET_ROOTPATH/usr/bin/$f $DEVTOOLSET_ROOTPATH/usr/bin/<%= target %>-$f ; done
+
+# ruby-2.5 links to libcrypt, which isn't necessary for extensions
+RUN find /usr/local/rake-compiler/ruby -name rbconfig.rb | while read f ; do sed -i 's/-lcrypt//' $f ; done
+<% end %>
+
+<% if platform=~/arm64-darwin/ %>
+# Add a arm64 darwin target as alternative to aarch64
+RUN grep -E 'rbconfig-aarch64-darwin' /usr/local/rake-compiler/config.yml | sed 's/rbconfig-[a-z0-9_]*-darwin/rbconfig-<%= platform %>/' >> /usr/local/rake-compiler/config.yml
 <% end %>
 
 # Install SIGINT forwarder
 COPY build/sigfw.c /root/
-RUN gcc $HOME/sigfw.c -o /usr/local/bin/sigfw
+RUN gcc $HOME/sigfw.c -o /usr/bin/sigfw
 
 # Install user mapper
-COPY build/runas /usr/local/bin/
+COPY build/runas /usr/bin/
 
 # Install sudoers configuration
 COPY build/sudoers /etc/sudoers.d/rake-compiler-dock
 
-ENV RUBY_CC_VERSION 3.0.0:2.7.0:2.6.0:2.5.0:2.4.0:2.3.0:2.2.2
+ENV RUBY_CC_VERSION 3.0.0:2.7.0:2.6.0:2.5.0:2.4.0:2.3.0
 
 CMD bash

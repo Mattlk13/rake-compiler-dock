@@ -1,3 +1,18 @@
+1.1.0 / 2020-12-29
+------------------
+
+* Use ManyLinux2014 as docker base image for linux targets.
+  That way compatibility to very old linux dists can be provided, while still using modern compilers.
+* Add macOS cross build targets "x86_64-darwin" and "arm64-darwin".
+  They are based on MacOSX-SDK-11.1
+* Add Ruby-3.0 as native rvm and cross ruby version.
+* Remove Ruby-2.2 from RUBY_CC_VERSION and cross rubies.
+* Update to Ubuntu-20.04 for Mingw and JRuby targets.
+* Set `ExtensionTask#no_native=true` to fix issues with cross_compiling callback not being called.
+  See discussion here: https://github.com/rake-compiler/rake-compiler/pull/171
+* Allow setting an alternative dockerhub user per `DOCKERHUB_USER`.
+
+
 1.0.1 / 2020-01-13
 ------------------
 
